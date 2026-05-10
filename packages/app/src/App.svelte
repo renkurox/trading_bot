@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import topics from "./topics"
+    import { topics } from "./topics";
   type Row = {
     symbol: string;
     changePercent: string;

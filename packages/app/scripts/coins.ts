@@ -3,32 +3,62 @@ interface Instrument {
 	baseCoin: string;
 	quoteCoin: string;
 	status: string;
+	contractType?: string;
 }
 
 interface BybitResponse {
 	result: {
 		list: Instrument[];
+		nextPageCursor?: string;
 	};
 }
 
-const response = await fetch(
-	"https://api.bybit.com/v5/market/instruments-info?category=spot"
-);
+const allInstruments: Instrument[] = [];
+let cursor = "";
 
-if (!response.ok) {
-	throw new Error("Failed to fetch");
-}
+do {
+	const url = new URL(
+		"https://api.bybit.com/v5/market/instruments-info"
+	);
 
-const data: BybitResponse = await response.json();
+	url.searchParams.set("category", "linear");
+	url.searchParams.set("limit", "1000");
 
-const usdtCoins = data.result.list
-	.filter((coin) => coin.quoteCoin === "USDT")
+	if (cursor) {
+		url.searchParams.set("cursor", cursor);
+	}
+
+	const response = await fetch(url);
+
+	if (!response.ok) {
+		throw new Error("Failed to fetch");
+	}
+
+	const data: BybitResponse = await response.json();
+
+	allInstruments.push(...data.result.list);
+
+	cursor = data.result.nextPageCursor || "";
+} while (cursor);
+
+const usdtLinearTopics = allInstruments
+	.filter(
+		(coin) =>
+			coin.quoteCoin === "USDT" &&
+			coin.status === "Trading" &&
+			coin.contractType === "LinearPerpetual"
+	)
 	.map((coin) => `kline.60.${coin.symbol}`);
 
 await Bun.write(
-  "topics.ts",
-  JSON.stringify(usdtCoins, null, 2)
+	"src/topics.ts",
+	`export const topics = ${JSON.stringify(
+		usdtLinearTopics,
+		null,
+		2
+	)} as const;\n`
 );
 
-export {};
+console.log(`Generated ${usdtLinearTopics.length} topics`);
 
+export {};
