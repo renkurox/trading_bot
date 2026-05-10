@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import symbols from "./symbol";
-
+  import topics from "./topics"
   type Row = {
     symbol: string;
     changePercent: string;
@@ -23,7 +22,7 @@
     ws.onopen = () => {
       ws!.send(JSON.stringify({
         op: "subscribe",
-        args: symbols,
+        args: topics,
       }));
     };
 
