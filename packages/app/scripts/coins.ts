@@ -48,7 +48,7 @@ const usdtLinearTopics = allInstruments
 			coin.status === "Trading" &&
 			coin.contractType === "LinearPerpetual"
 	)
-	.map((coin) => `kline.60.${coin.symbol}`);
+	.map((coin) => `kline.240.${coin.symbol}`);
 
 await Bun.write(
 	"src/topics.ts",
