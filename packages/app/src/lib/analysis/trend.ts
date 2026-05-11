@@ -17,10 +17,48 @@ export function calculateEMA(
   return ema;
 }
 
+export type EmaDir = "UP" | "DOWN" | "FLAT";
+
+function getDir(curr: number, prev: number): EmaDir {
+  if (curr > prev) return "UP";
+  if (curr < prev) return "DOWN";
+  return "FLAT";
+}
+
 export interface TrendResult {
-  trend: string;
-  ema20: number;
-  ema50: number;
+  ema20Dir: EmaDir;
+  ema50Dir: EmaDir;
+}
+
+export type VolumeTrend = "RISING" | "FALLING" | "FLAT";
+
+export interface VolumeTrendResult {
+  volumeTrend: VolumeTrend;
+  volEma20Dir: EmaDir;
+  volEma50Dir: EmaDir;
+}
+
+export function analyzeVolumeTrend(
+  volumes: number[]
+): VolumeTrendResult {
+  const volEma20 = calculateEMA(volumes, 20);
+  const volEma50 = calculateEMA(volumes, 50);
+  const prevVolEma20 = calculateEMA(volumes.slice(0, -1), 20);
+  const prevVolEma50 = calculateEMA(volumes.slice(0, -1), 50);
+
+  let volumeTrend: VolumeTrend = "FLAT";
+
+  if (volEma20 > volEma50 * 1.05) {
+    volumeTrend = "RISING";
+  } else if (volEma20 < volEma50 * 0.95) {
+    volumeTrend = "FALLING";
+  }
+
+  return {
+    volumeTrend,
+    volEma20Dir: getDir(volEma20, prevVolEma20),
+    volEma50Dir: getDir(volEma50, prevVolEma50),
+  };
 }
 
 export function analyzeTrend(
@@ -33,13 +71,14 @@ export function analyzeTrend(
   const ema50 =
     calculateEMA(closes, 50);
 
-  let trend = "RANGE";
+  const prevEma20 =
+    calculateEMA(closes.slice(0, -1), 20);
 
-  if (ema20 > ema50) {
-    trend = "UPTREND";
-  } else if (ema20 < ema50) {
-    trend = "DOWNTREND";
-  }
+  const prevEma50 =
+    calculateEMA(closes.slice(0, -1), 50);
 
-  return { trend, ema20, ema50 };
+  return {
+    ema20Dir: getDir(ema20, prevEma20),
+    ema50Dir: getDir(ema50, prevEma50),
+  };
 }

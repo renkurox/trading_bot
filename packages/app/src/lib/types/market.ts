@@ -1,18 +1,15 @@
-import type { Signal } from "$lib/analysis/flow";
+import type { VolumeTrend, EmaDir } from "$lib/analysis/trend";
 
 export interface CoinAnalysis {
   symbol: string;
-  price: number;
-  volume24h: number;
-  oi: number;
+  ema20Dir: EmaDir;
+  ema50Dir: EmaDir;
+  volumeTrend: VolumeTrend;
+  volEma20Dir: EmaDir;
+  volEma50Dir: EmaDir;
   oiChange: number;
-  funding: number;
-  trend: string;
-  ema20: number;
-  ema50: number;
-  signal: Signal;
-  state: string;
-  score: number;
   h4Change: number;
+  funding: number;
+  score: number;
   reason: string;
 }

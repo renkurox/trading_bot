@@ -92,31 +92,45 @@
   });
 </script>
 
-<div class="grid grid-cols-2 gap-6">
-  <div>
-    {#if positiveRows.length > 0}
-      <p>{positiveRows.length}</p>
-    {/if}
-    {#each positiveRows as row (row.symbol)}
-      <p class="">
-        <span>{row.symbol}</span>
-        <span>
-          {row.changePercent}%
-        </span>
-      </p>
-    {/each}
-  </div>
-  <div>
-    {#if negativeRows.length > 0}
-      <p>{negativeRows.length}</p>
-    {/if}
-    {#each negativeRows as row (row.symbol)}
-      <p class="">
-        <span>{row.symbol}</span>
-        <span>
-          {row.changePercent}%
-        </span>
-      </p>
-    {/each}
+<style>
+  .scanner { font-family: monospace; max-width: 700px; margin: 0 auto; }
+  h1 { font-size: 1rem; padding-bottom: 0.5rem; }
+  .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+  .col-header { display: flex; justify-content: space-between; padding-bottom: 0.25rem; opacity: 0.5; font-size: 0.8rem; }
+  .row { display: flex; justify-content: space-between; padding: 0.15rem 0; font-size: 0.85rem; }
+  .symbol { font-weight: bold; }
+  .up { color: #22c55e; }
+  .down { color: #ef4444; }
+</style>
+
+<div class="scanner">
+  <h1>Live H4 Change</h1>
+
+  <div class="columns">
+    <div>
+      <div class="col-header">
+        <span class="up">LONG</span>
+        <span>{positiveRows.length}</span>
+      </div>
+      {#each positiveRows as row (row.symbol)}
+        <div class="row">
+          <span class="symbol">{row.symbol}</span>
+          <span class="up">+{row.changePercent}%</span>
+        </div>
+      {/each}
+    </div>
+
+    <div>
+      <div class="col-header">
+        <span class="down">SHORT</span>
+        <span>{negativeRows.length}</span>
+      </div>
+      {#each negativeRows as row (row.symbol)}
+        <div class="row">
+          <span class="symbol">{row.symbol}</span>
+          <span class="down">{row.changePercent}%</span>
+        </div>
+      {/each}
+    </div>
   </div>
 </div>

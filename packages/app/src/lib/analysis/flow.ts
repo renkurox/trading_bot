@@ -1,3 +1,5 @@
+import type { VolumeTrend } from "$lib/analysis/trend";
+
 export type Signal = "LONG" | "SHORT" | "SKIP";
 
 export interface FlowResult {
@@ -12,10 +14,10 @@ export function analyzeFlow(
   h4Change: number,
   oiChange: number,
   funding: number,
-  volume: number,
+  volumeTrend: VolumeTrend,
 ): FlowResult {
   const absFunding = Math.abs(funding);
-  const volScore = Math.min(Math.log10(volume / 1_000_000 + 1) * 2, 10);
+  const volBoost = volumeTrend === "RISING" ? 1.5 : volumeTrend === "FLAT" ? 1.0 : 0.5;
 
   // OI rising = new positions opening, OI dropping = positions closing
   const oiRising = oiChange > 1;
@@ -26,33 +28,38 @@ export function analyzeFlow(
   let reason = "";
   let score = 0;
 
-  // LONG: uptrend + price rising + OI rising + funding not overheated
-  if (trend === "UPTREND" && h4Change > 0 && oiRising && absFunding < 0.01) {
+  // LONG: uptrend + price rising + OI rising + volume confirming + funding not overheated
+  if (trend === "UPTREND" && h4Change > 0 && oiRising && volumeTrend !== "FALLING" && absFunding < 0.01) {
     signal = "LONG";
     state = "LONG_FLOW";
-    reason = "Uptrend + new longs entering";
-    score = h4Change * 0.3 + oiChange * 0.4 + volScore * 0.3;
+    reason = `Uptrend + new longs + vol ${volumeTrend}`;
+    score = (h4Change * 0.3 + oiChange * 0.4 + 3 * 0.3) * volBoost;
   }
-  // SHORT: downtrend + price falling + OI rising + funding not overheated
-  else if (trend === "DOWNTREND" && h4Change < 0 && oiRising && absFunding < 0.01) {
+  // SHORT: downtrend + price falling + OI rising + volume confirming + funding not overheated
+  else if (trend === "DOWNTREND" && h4Change < 0 && oiRising && volumeTrend !== "FALLING" && absFunding < 0.01) {
     signal = "SHORT";
     state = "SHORT_FLOW";
-    reason = "Downtrend + new shorts entering";
-    score = Math.abs(h4Change) * 0.3 + oiChange * 0.4 + volScore * 0.3;
+    reason = `Downtrend + new shorts + vol ${volumeTrend}`;
+    score = (Math.abs(h4Change) * 0.3 + oiChange * 0.4 + 3 * 0.3) * volBoost;
   }
-  // Strong long momentum with big move
-  else if (h4Change > 2 && oiRising) {
+  // Strong long momentum with big move + volume rising
+  else if (h4Change > 2 && oiRising && volumeTrend === "RISING") {
     signal = "LONG";
     state = "STRONG_LONG";
-    reason = "Strong H4 pump + OI rising";
-    score = h4Change * 0.4 + oiChange * 0.3 + volScore * 0.3;
+    reason = "Strong H4 pump + OI rising + vol RISING";
+    score = (h4Change * 0.4 + oiChange * 0.3 + 3 * 0.3) * volBoost;
   }
-  // Strong short momentum with big move
-  else if (h4Change < -2 && oiRising) {
+  // Strong short momentum with big move + volume rising
+  else if (h4Change < -2 && oiRising && volumeTrend === "RISING") {
     signal = "SHORT";
     state = "STRONG_SHORT";
-    reason = "Strong H4 dump + OI rising";
-    score = Math.abs(h4Change) * 0.4 + oiChange * 0.3 + volScore * 0.3;
+    reason = "Strong H4 dump + OI rising + vol RISING";
+    score = (Math.abs(h4Change) * 0.4 + oiChange * 0.3 + 3 * 0.3) * volBoost;
+  }
+  // Volume falling = low conviction, skip
+  else if (volumeTrend === "FALLING") {
+    state = "LOW_VOLUME";
+    reason = "Volume EMA declining";
   }
   // OI dropping = positions closing, avoid
   else if (oiDropping) {
