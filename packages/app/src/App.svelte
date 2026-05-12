@@ -5,6 +5,5 @@
 
 <a href={p("/")}>Home</a>
 <a href={p("/market")}>Market</a>
-<a href={p("/near-ema")}>Near EMA</a>
 
 <Router />
