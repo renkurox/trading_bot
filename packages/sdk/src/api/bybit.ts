@@ -24,7 +24,7 @@ export async function fetchOIHistory(symbol: string) {
         category: "linear",
         symbol,
         intervalTime: "4h",
-        limit: 2,
+        limit: 4,
       },
     }
   );
@@ -57,7 +57,8 @@ export async function fetchH4Kline(
         params: {
           category: "linear",
           symbol,
-          interval: "240"
+          interval: "240",
+          limit: 60,
         }
       }
     );

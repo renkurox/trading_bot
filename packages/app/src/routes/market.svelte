@@ -1,17 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { marketData } from "$lib/stores/market";
-  import { scanMarket } from "$lib/analysis/scanner";
+  import { scanMarket } from "@tb/sdk";
 
   let loading = true;
-  let sortBy: "score" | "ema" = "score";
-
-  $: sorted = sortBy === "ema"
-    ? [...$marketData].sort((a, b) =>
-        Math.min(Math.abs(a.distEma20), Math.abs(a.distEma50))
-        - Math.min(Math.abs(b.distEma20), Math.abs(b.distEma50))
-      )
-    : $marketData;
 
   async function loadData() {
     try {
@@ -45,9 +37,6 @@
   .badge { font-size: 0.75rem; padding: 0.1rem 0.3rem; border-radius: 2px; }
   .badge-converge { color: #f59e0b; border: 1px solid #f59e0b; }
   .badge-daily { opacity: 0.7; }
-  .sort-bar { display: flex; gap: 0.5rem; padding-bottom: 0.5rem; }
-  .sort-btn { font-family: monospace; font-size: 0.8rem; padding: 0.25rem 0.5rem; border: 1px solid #333; background: none; color: #888; cursor: pointer; }
-  .sort-btn.active { color: #fff; border-color: #fff; }
 </style>
 
 <div class="scanner">
@@ -56,11 +45,7 @@
   {#if loading}
     <p>Loading...</p>
   {:else}
-    <div class="sort-bar">
-      <button class="sort-btn" class:active={sortBy === 'score'} on:click={() => sortBy = 'score'}>Score</button>
-      <button class="sort-btn" class:active={sortBy === 'ema'} on:click={() => sortBy = 'ema'}>Near EMA</button>
-    </div>
-    {#each sorted as coin, i}
+    {#each $marketData as coin, i}
       <div class="coin">
         <div class="header">
           <span class="symbol">{i + 1}. {coin.symbol}</span>

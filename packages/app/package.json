@@ -1,6 +1,9 @@
 {
   "name": "@tb/app",
   "type": "module",
+  "dependencies": {
+    "@tb/sdk": "workspace:*"
+  },
   "devDependencies": {
     "@fontsource-variable/quicksand": "^5.2.10",
     "@lucide/svelte": "^1.8.0",

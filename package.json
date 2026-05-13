@@ -1,4 +1,7 @@
 {
+  "workspaces": [
+    "packages/*"
+  ],
   "devDependencies": {
     "nx": "^22.6.5"
   }

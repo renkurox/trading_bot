@@ -19,9 +19,10 @@ export function calculateEMA(
 
 export type EmaDir = "UP" | "DOWN" | "FLAT";
 
-function getDir(curr: number, prev: number): EmaDir {
-  if (curr > prev) return "UP";
-  if (curr < prev) return "DOWN";
+function getDir(curr: number, prev: number, threshold = 0.0001): EmaDir {
+  const pct = (curr - prev) / prev;
+  if (pct > threshold) return "UP";
+  if (pct < -threshold) return "DOWN";
   return "FLAT";
 }
 
