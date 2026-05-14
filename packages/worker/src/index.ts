@@ -45,24 +45,12 @@ async function sendTelegram(token: string, chatId: string, text: string): Promis
 }
 
 function isGoodSetup(c: CoinAnalysis): boolean {
-	// Only Category A (confirmed) or B (breakout)
 	if (c.category === "C") return false;
-	// Skip bad phases
-	if (c.phase === "REVERSAL_RISK" || c.phase === "UNCLEAR" || c.phase === "EXHAUSTION") return false;
-	// Not overextended
+	if (c.phase === "EXHAUSTION" || c.phase === "REVERSAL_RISK") return false;
 	if (Math.abs(c.distEma50) > 5) return false;
-	// Category A: strong confirmed trend
-	if (c.category === "A") {
-		if (c.confirmationScore < 60) return false;
-		if (c.volVsAvg <= 0) return false;
-		if (c.oiSignal === "NEUTRAL") return false;
-	}
-	// Category B: high potential breakout
-	if (c.category === "B") {
-		if (c.potentialScore < 55) return false;
-		if (!c.compressed) return false;
-	}
-	return true;
+	if (c.category === "A") return c.confirmationScore >= 60;
+	if (c.category === "B") return c.potentialScore >= 55;
+	return false;
 }
 
 const SCAN_LIMIT = 15;

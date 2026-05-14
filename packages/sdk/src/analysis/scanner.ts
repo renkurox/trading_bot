@@ -109,14 +109,17 @@ export function confirmationScore(i: ScoreInput): number {
   if (dailyMatch && i.dailyAligned) trend += 40;
   else if (dailyMatch) trend += 25;
   else if (counterTrend) trend -= 30;
-  // Entry quality bonus
+  // Entry quality: closer to EMA = better entry, extended = worse
   const nearest = Math.min(Math.abs(i.distEma20), Math.abs(i.distEma50));
   const pullback = (dir > 0 && i.distEma20 < 0 && i.distEma20 > -2) || (dir < 0 && i.distEma20 > 0 && i.distEma20 < 2);
   if (pullback) trend += 20;
   else if (nearest < 0.5) trend += 20;
   else if (nearest < 1.5) trend += 10;
-  else if (nearest > 5) trend -= 20;
-  else if (nearest > 10) trend -= 40;
+  else if (nearest < 3) trend += 5;
+  else if (nearest < 5) trend -= 10;
+  else if (nearest < 8) trend -= 20;
+  else if (nearest < 10) trend -= 30;
+  else trend -= 40;
   trend = Math.max(0, Math.min(100, trend));
 
   // Momentum (0-100)
@@ -168,6 +171,10 @@ export function potentialScore(i: ScoreInput): number {
   // Momentum acceleration bonus
   if (i.momAccel > 0.5 && i.compressed) volExp = Math.min(volExp + 20, 100);
 
+  // EMA proximity (0-100): tight to EMA = better R:R for breakout
+  const nearest = Math.min(Math.abs(i.distEma20), Math.abs(i.distEma50));
+  const ema = nearest < 0.5 ? 100 : nearest < 1 ? 85 : nearest < 2 ? 65 : nearest < 3 ? 40 : nearest < 5 ? 20 : 0;
+
   // Funding health (0-100)
   const absFR = Math.abs(i.funding);
   const fr = absFR < 0.0003 ? 100 : absFR < 0.0005 ? 60 : absFR < 0.001 ? 30 : 0;
@@ -177,7 +184,7 @@ export function potentialScore(i: ScoreInput): number {
   if (i.dailyAligned) daily = 100;
   else if (i.dailyEmaDir !== "FLAT") daily = 70;
 
-  const score = comp * 0.30 + oiBuild * 0.30 + volExp * 0.20 + fr * 0.10 + daily * 0.10;
+  const score = comp * 0.25 + oiBuild * 0.25 + volExp * 0.15 + ema * 0.15 + fr * 0.10 + daily * 0.10;
   return round(score);
 }
 
