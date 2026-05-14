@@ -6,8 +6,6 @@ interface Env {
 	TELEGRAM_CHAT_ID: string;
 }
 
-const MIN_SCORE = 10;
-
 function fmt(n: number): string {
 	const s = n.toFixed(2);
 	return n >= 0 ? `+${s}` : s;
@@ -15,15 +13,16 @@ function fmt(n: number): string {
 
 function formatCoin(coin: CoinAnalysis): string {
 	const dir = coin.ema20Dir === "UP" ? "LONG" : "SHORT";
-	const d = coin.dailyEmaDir === "UP" ? "▲" : coin.dailyEmaDir === "DOWN" ? "▼" : "—";
-	const sq = coin.emaConverging ? " SQUEEZE" : "";
-	const oiTag = coin.oiSignal === "LONGS_OPEN" ? "L↑" : coin.oiSignal === "SHORTS_OPEN" ? "S↑" : coin.oiSignal === "SHORTS_CLOSE" ? "S↓" : coin.oiSignal === "LONGS_CLOSE" ? "L↓" : "";
+	const daily = coin.dailyEmaDir === "UP" ? "Daily UP" : coin.dailyEmaDir === "DOWN" ? "Daily DOWN" : "Daily FLAT";
+	const comp = coin.compressed ? `  Compressed ${coin.compressionScore}/100` : "";
+	const oiLabel = coin.oiSignal === "LONGS_OPEN" ? "Longs opening" : coin.oiSignal === "SHORTS_OPEN" ? "Shorts opening" : coin.oiSignal === "SHORTS_CLOSE" ? "Shorts closing" : coin.oiSignal === "LONGS_CLOSE" ? "Longs closing" : "OI flat";
 
 	return [
-		`${coin.symbol}  ${dir}  ${coin.score}`,
+		`${coin.symbol}  ${dir}  ${coin.phase}`,
+		`Confirm: ${coin.confirmationScore}  Potential: ${coin.potentialScore}`,
 		coin.reason,
-		`EMA20 ${fmt(coin.distEma20)}%  EMA50 ${fmt(coin.distEma50)}%  H4 ${fmt(coin.h4Change)}%${sq}`,
-		`D ${d}  OI ${fmt(coin.oiChange)}% ${oiTag}  Vol ${fmt(coin.volVsAvg)}%  FR ${(coin.funding * 100).toFixed(4)}%`,
+		`EMA20 ${fmt(coin.distEma20)}%  EMA50 ${fmt(coin.distEma50)}%  H4 ${fmt(coin.h4Change)}% ${coin.momentum}${comp}`,
+		`${daily}  OI ${fmt(coin.oiChange)}% ${oiLabel}  Vol ${fmt(coin.volVsAvg)}%  FR ${(coin.funding * 100).toFixed(4)}%`,
 	].join("\n");
 }
 
@@ -46,12 +45,23 @@ async function sendTelegram(token: string, chatId: string, text: string): Promis
 }
 
 function isGoodSetup(c: CoinAnalysis): boolean {
-	if (c.score < MIN_SCORE) return false;
-	if (c.tradeType === "REVERSAL_RISK" || c.tradeType === "UNCLEAR") return false;
-	if (c.dailyEmaDir !== "FLAT" && c.dailyEmaDir !== c.ema20Dir) return false;
-	if (Math.abs(c.distEma20) > 5) return false;
-	if (c.volVsAvg <= 0) return false;
-	if (c.oiSignal === "NEUTRAL") return false;
+	// Only Category A (confirmed) or B (breakout)
+	if (c.category === "C") return false;
+	// Skip bad phases
+	if (c.phase === "REVERSAL_RISK" || c.phase === "UNCLEAR" || c.phase === "EXHAUSTION") return false;
+	// Not overextended
+	if (Math.abs(c.distEma50) > 5) return false;
+	// Category A: strong confirmed trend
+	if (c.category === "A") {
+		if (c.confirmationScore < 60) return false;
+		if (c.volVsAvg <= 0) return false;
+		if (c.oiSignal === "NEUTRAL") return false;
+	}
+	// Category B: high potential breakout
+	if (c.category === "B") {
+		if (c.potentialScore < 55) return false;
+		if (!c.compressed) return false;
+	}
 	return true;
 }
 
@@ -70,7 +80,7 @@ async function runScan(env: Env): Promise<void> {
 
 	await sendTelegram(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID, formatCoin(good[0]));
 
-	console.log(`Sent best setup: ${good[0].symbol} (${good[0].score})`);
+	console.log(`Sent best setup: ${good[0].symbol} (${good[0].score}) [${good[0].category}]`);
 }
 
 export default {
@@ -80,7 +90,7 @@ export default {
 			await runScan(env);
 			return new Response("OK");
 		}
-		return new Response("H4 Scanner Worker. Use /__scheduled to trigger manually.");
+		return new Response("H4 Scanner Worker V2. Use /__scheduled to trigger manually.");
 	},
 
 	async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {

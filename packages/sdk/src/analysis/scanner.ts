@@ -1,12 +1,20 @@
 import { fetchTickers, fetchH4Kline, fetchDailyKline, fetchOIHistory } from "../api/bybit";
 import { analyzeTrend, calculateEMA } from "../analysis/trend";
-import type { CoinAnalysis, OiSignal, TradeType } from "../types/market";
+import { analyzeCompression } from "../analysis/volatility";
+import type { Candle } from "../analysis/volatility";
+import type { CoinAnalysis, OiSignal, MarketPhase, MomentumClass, Category } from "../types/market";
 import type { EmaDir } from "../analysis/trend";
 
 const MIN_VOLUME = 10_000_000;
 const MAX_VOLUME = 2_000_000_000;
 const MIN_OI = 5_000_000;
 const CONCURRENCY = 8;
+
+// --- Helpers ---
+
+function round(n: number, d = 2): number {
+  return Math.round(n * 10 ** d) / 10 ** d;
+}
 
 function getOiSignal(oiChange: number, h4Change: number): OiSignal {
   if (Math.abs(oiChange) < 0.5) return "NEUTRAL";
@@ -17,102 +25,260 @@ function getOiSignal(oiChange: number, h4Change: number): OiSignal {
   return "NEUTRAL";
 }
 
-function getTradeType(
-  ema20Dir: EmaDir,
-  ema50Dir: EmaDir,
-  emaConverging: boolean,
-  h4Change: number,
-  priceSide: number,
-): TradeType {
-  const dir = ema20Dir === "UP" ? 1 : ema20Dir === "DOWN" ? -1 : 0;
-  const aligned = ema20Dir === ema50Dir && ema20Dir !== "FLAT";
-  const h4Matches = (dir > 0 && h4Change > 0) || (dir < 0 && h4Change < 0);
-  // priceSide > 0 = price above EMA, < 0 = price below EMA
-  const pullback = (dir > 0 && priceSide < 0) || (dir < 0 && priceSide > 0);
+function classifyMomentum(h4Change: number): MomentumClass {
+  const abs = Math.abs(h4Change);
+  if (abs < 0.3) return "WEAK";
+  if (abs < 0.8) return "MODERATE";
+  if (abs < 1.5) return "STRONG";
+  return "EXPANSION";
+}
 
-  if (emaConverging && !aligned) return "SQUEEZE";
-  if (aligned && pullback) return "PULLBACK";
-  if (aligned && h4Matches) return "CONTINUATION";
-  if (aligned && !h4Matches) return "REVERSAL_RISK";
+// Momentum acceleration: compare recent momentum vs prior momentum
+function momentumAcceleration(closes: number[]): number {
+  if (closes.length < 9) return 0;
+  // Recent 3-candle move vs prior 3-candle move
+  const recent = closes.slice(-3);
+  const mid = closes.slice(-6, -3);
+  const recentMove = (recent[2] - recent[0]) / recent[0] * 100;
+  const priorMove = (mid[2] - mid[0]) / mid[0] * 100;
+  // Acceleration = change in momentum (positive = accelerating)
+  return round(recentMove - priorMove);
+}
+
+// Weighted OI momentum: recent periods weighted more heavily
+function weightedOiMomentum(oiHistory: any[]): number {
+  if (oiHistory.length < 4) return 0;
+  const values = oiHistory.map((o: any) => Number(o.openInterest)).reverse();
+  // weights: most recent = highest weight
+  const weights = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5];
+  let wSum = 0;
+  let wTotal = 0;
+  for (let i = 1; i < values.length && i < weights.length; i++) {
+    const change = values[i] > 0 && values[i - 1] > 0
+      ? ((values[i] - values[i - 1]) / values[i - 1]) * 100
+      : 0;
+    wSum += change * weights[i];
+    wTotal += weights[i];
+  }
+  return wTotal > 0 ? round(wSum / wTotal) : 0;
+}
+
+function klinesToCandles(klines: any[]): Candle[] {
+  return klines.map((k: any) => ({
+    open: Number(k[1]),
+    high: Number(k[2]),
+    low: Number(k[3]),
+    close: Number(k[4]),
+    volume: Number(k[5]),
+  })).reverse();
+}
+
+// --- Dual Scoring ---
+
+interface ScoreInput {
+  ema20Dir: EmaDir;
+  ema50Dir: EmaDir;
+  dailyEmaDir: EmaDir;
+  dailyAligned: boolean;
+  distEma20: number;
+  distEma50: number;
+  volVsAvg: number;
+  oiSignal: OiSignal;
+  oiMomentum: number;
+  h4Change: number;
+  momentum: MomentumClass;
+  momAccel: number;
+  funding: number;
+  compressionScore: number;
+  compressed: boolean;
+  breakoutTriggered: boolean;
+}
+
+// Confirmation Score: ranks confirmed trends
+// Weights: Trend 35%, Momentum 25%, OI 20%, Volume 10%, Funding 10%
+export function confirmationScore(i: ScoreInput): number {
+  const dir = i.ema20Dir === "UP" ? 1 : i.ema20Dir === "DOWN" ? -1 : 0;
+  const aligned = i.ema20Dir === i.ema50Dir && i.ema20Dir !== "FLAT";
+  const dailyMatch = i.dailyEmaDir === i.ema20Dir && i.dailyEmaDir !== "FLAT";
+  const counterTrend = aligned && i.dailyEmaDir !== "FLAT" && !dailyMatch;
+
+  // Trend (0-100)
+  let trend = 0;
+  if (aligned) trend += 40;
+  else if (i.ema20Dir !== "FLAT") trend += 15;
+  if (dailyMatch && i.dailyAligned) trend += 40;
+  else if (dailyMatch) trend += 25;
+  else if (counterTrend) trend -= 30;
+  // Entry quality bonus
+  const nearest = Math.min(Math.abs(i.distEma20), Math.abs(i.distEma50));
+  const pullback = (dir > 0 && i.distEma20 < 0 && i.distEma20 > -2) || (dir < 0 && i.distEma20 > 0 && i.distEma20 < 2);
+  if (pullback) trend += 20;
+  else if (nearest < 0.5) trend += 20;
+  else if (nearest < 1.5) trend += 10;
+  else if (nearest > 5) trend -= 20;
+  else if (nearest > 10) trend -= 40;
+  trend = Math.max(0, Math.min(100, trend));
+
+  // Momentum (0-100)
+  let mom = 0;
+  const h4Match = (dir > 0 && i.h4Change > 0) || (dir < 0 && i.h4Change < 0);
+  if (i.momentum === "EXPANSION" && h4Match) mom = 100;
+  else if (i.momentum === "STRONG" && h4Match) mom = 75;
+  else if (i.momentum === "MODERATE" && h4Match) mom = 50;
+  else if (i.momentum === "WEAK" && h4Match) mom = 25;
+  else if (!h4Match && i.momentum !== "WEAK") mom = 10; // pullback credit
+
+  // OI (0-100)
+  let oi = 0;
+  const oiMatch = (dir > 0 && i.oiSignal === "LONGS_OPEN") || (dir < 0 && i.oiSignal === "SHORTS_OPEN");
+  const oiAgainst = (dir > 0 && i.oiSignal === "SHORTS_OPEN") || (dir < 0 && i.oiSignal === "LONGS_OPEN");
+  if (oiMatch) oi = Math.min(Math.abs(i.oiMomentum) * 30, 100);
+  else if (i.oiSignal === "SHORTS_CLOSE" || i.oiSignal === "LONGS_CLOSE") oi = 20;
+  if (oiAgainst) oi = Math.max(oi - 30, 0);
+
+  // Volume (0-100)
+  const vol = i.volVsAvg > 100 ? 100 : i.volVsAvg > 50 ? 75 : i.volVsAvg > 0 ? 50 : 0;
+
+  // Funding (0-100, 100 = safe)
+  const absFR = Math.abs(i.funding);
+  const fr = absFR >= 0.001 ? 0 : absFR >= 0.0005 ? 30 : absFR >= 0.0003 ? 60 : 100;
+
+  const score = trend * 0.35 + mom * 0.25 + oi * 0.20 + vol * 0.10 + fr * 0.10;
+  return round(score);
+}
+
+// Potential Score: ranks setups likely to expand soon
+// Weights: Compression 30%, OI Buildup 30%, Volume Expansion 20%, Funding Health 10%, Daily Bias 10%
+export function potentialScore(i: ScoreInput): number {
+  // Compression (0-100)
+  const comp = i.compressionScore;
+
+  // OI Buildup (0-100): gradual OI rise during compression is gold
+  let oiBuild = 0;
+  const oiRising = i.oiMomentum > 0;
+  if (oiRising && i.compressed) oiBuild = Math.min(i.oiMomentum * 40, 100);
+  else if (oiRising) oiBuild = Math.min(i.oiMomentum * 20, 60);
+
+  // Volume expansion (0-100): dry-up during compression = energy, expansion = confirmation
+  let volExp = 0;
+  if (i.compressed && i.volVsAvg < 0) volExp = 60; // dry-up = energy buildup
+  else if (i.compressed && i.volVsAvg > 0) volExp = 80; // volume returning = breakout starting
+  else if (i.volVsAvg > 50) volExp = 70;
+  else if (i.volVsAvg > 0) volExp = 30;
+  // Momentum acceleration bonus
+  if (i.momAccel > 0.5 && i.compressed) volExp = Math.min(volExp + 20, 100);
+
+  // Funding health (0-100)
+  const absFR = Math.abs(i.funding);
+  const fr = absFR < 0.0003 ? 100 : absFR < 0.0005 ? 60 : absFR < 0.001 ? 30 : 0;
+
+  // Daily bias (0-100)
+  let daily = 50; // neutral
+  if (i.dailyAligned) daily = 100;
+  else if (i.dailyEmaDir !== "FLAT") daily = 70;
+
+  const score = comp * 0.30 + oiBuild * 0.30 + volExp * 0.20 + fr * 0.10 + daily * 0.10;
+  return round(score);
+}
+
+// --- Market Phase Classification ---
+
+function classifyPhase(i: ScoreInput, confScore: number, potScore: number): MarketPhase {
+  const dir = i.ema20Dir === "UP" ? 1 : i.ema20Dir === "DOWN" ? -1 : 0;
+  const aligned = i.ema20Dir === i.ema50Dir && i.ema20Dir !== "FLAT";
+  const h4Match = (dir > 0 && i.h4Change > 0) || (dir < 0 && i.h4Change < 0);
+  const absFR = Math.abs(i.funding);
+  const absDist = Math.abs(i.distEma20);
+
+  // Exhaustion: extended + crowded + momentum slowing
+  if (absDist > 5 && absFR >= 0.0005 && i.momentum !== "EXPANSION") return "EXHAUSTION";
+  if (absDist > 8 && i.volVsAvg < 0) return "EXHAUSTION";
+  if (absDist > 10) return "EXHAUSTION";
+
+  // Volatility expansion: breakout triggered + volume surge + momentum
+  if (i.breakoutTriggered && i.volVsAvg > 30 && (i.momentum === "STRONG" || i.momentum === "EXPANSION")) {
+    return "VOLATILITY_EXPANSION";
+  }
+  if (i.compressed && i.breakoutTriggered && i.momAccel > 0.3) {
+    return "VOLATILITY_EXPANSION";
+  }
+
+  // Early breakout: compressed + OI building + funding healthy (no price trigger yet)
+  if (i.compressed && i.oiMomentum > 0.5 && absFR < 0.0005) {
+    return "EARLY_BREAKOUT";
+  }
+  if (potScore > 60 && i.compressed) return "EARLY_BREAKOUT";
+
+  // Continuation: aligned + momentum confirms + OI confirms
+  if (aligned && h4Match && confScore > 50) return "CONTINUATION";
+
+  // Reversal risk: counter-trend signals
+  if (aligned && !h4Match) return "REVERSAL_RISK";
+
   return "UNCLEAR";
 }
 
-export function tradeScore(
-  ema20Dir: EmaDir,
-  ema50Dir: EmaDir,
-  dailyEmaDir: EmaDir,
-  dailyAligned: boolean,
-  emaConverging: boolean,
-  distEma20: number,
-  distEma50: number,
-  volVsAvg: number,
-  oiSignal: OiSignal,
-  oiChange: number,
-  h4Change: number,
-  funding: number,
-): number {
-  let s = 0;
-  const dir = ema20Dir === "UP" ? 1 : ema20Dir === "DOWN" ? -1 : 0;
-  const aligned = ema20Dir === ema50Dir && ema20Dir !== "FLAT";
-  const dailyMatch = dailyEmaDir === ema20Dir && dailyEmaDir !== "FLAT";
-  const counterTrend = aligned && dailyEmaDir !== "FLAT" && !dailyMatch;
+// --- Category Assignment ---
 
-  // EMA alignment: both same direction = strong trend
-  if (aligned) s += 3;
-  else if (ema20Dir !== "FLAT") s += 1;
-
-  // Daily EMA confirms or conflicts
-  if (dailyMatch && dailyAligned) s += 3;
-  else if (dailyMatch) s += 2;
-  else if (counterTrend) s -= 3;
-
-  // EMA converging — only valuable when EMAs are not yet aligned
-  if (emaConverging && !aligned && ema20Dir !== "FLAT") s += 1;
-
-  // Entry quality: pullback to EMA (exclusive with distance bonus)
-  const nearestEma = Math.min(Math.abs(distEma20), Math.abs(distEma50));
-  const pullbackEntry =
-    (dir > 0 && distEma20 < 0 && distEma20 > -2) ||
-    (dir < 0 && distEma20 > 0 && distEma20 < 2);
-  if (pullbackEntry) s += 2.5;
-  else if (nearestEma < 0.3) s += 3;
-  else if (nearestEma < 0.8) s += 2;
-  else if (nearestEma < 1.5) s += 1;
-  else if (nearestEma > 10) s -= 5;
-  else if (nearestEma > 5) s -= 3;
-  else if (nearestEma > 3) s -= 2;
-
-  // Volume: continuous scale (0 to 3)
-  if (volVsAvg > 0) s += Math.min(volVsAvg / 50, 3);
-
-  // OI: reward if matches trend direction, penalize if against
-  // Reduce OI credit when trading counter to daily
-  const oiMatchesTrend =
-    (dir > 0 && oiSignal === "LONGS_OPEN") ||
-    (dir < 0 && oiSignal === "SHORTS_OPEN");
-  const oiAgainstTrend =
-    (dir > 0 && oiSignal === "SHORTS_OPEN") ||
-    (dir < 0 && oiSignal === "LONGS_OPEN");
-  const oiCredit = counterTrend ? 0.5 : 1;
-  if (oiMatchesTrend) s += Math.min(Math.abs(oiChange), 3) * oiCredit;
-  else if (oiSignal === "SHORTS_CLOSE" || oiSignal === "LONGS_CLOSE") s += 0.5;
-  if (oiAgainstTrend) s -= 1;
-
-  // H4 momentum: full credit if matches trend, small credit for pullback, none for FLAT
-  if (dir !== 0) {
-    const h4MatchesTrend = (dir > 0 && h4Change > 0) || (dir < 0 && h4Change < 0);
-    if (h4MatchesTrend) s += Math.min(Math.abs(h4Change), 3);
-    else s += Math.min(Math.abs(h4Change), 1);
-  }
-
-  // Funding rate penalty (abs > 0.0003 = 0.03% starts penalizing, > 0.001 = 0.1% heavy)
-  const absFR = Math.abs(funding);
-  if (absFR >= 0.001) s -= 3;
-  else if (absFR >= 0.0005) s -= 1.5;
-  else if (absFR >= 0.0003) s -= 0.5;
-
-  return Math.round(s * 100) / 100;
+function assignCategory(phase: MarketPhase, confScore: number, potScore: number): Category {
+  // A: confirmed trends
+  if (phase === "CONTINUATION" && confScore > 60) return "A";
+  if (phase === "VOLATILITY_EXPANSION" && confScore > 50) return "A";
+  // B: breakout watchlist
+  if (phase === "EARLY_BREAKOUT") return "B";
+  if (phase === "VOLATILITY_EXPANSION") return "B";
+  // C: everything else (exhaustion, reversal, unclear)
+  return "C";
 }
+
+// --- Reason ---
+
+const OI_LABELS: Record<OiSignal, string> = {
+  LONGS_OPEN: "longs opening",
+  SHORTS_OPEN: "shorts opening",
+  SHORTS_CLOSE: "shorts closing",
+  LONGS_CLOSE: "longs closing",
+  NEUTRAL: "OI flat",
+};
+
+export function detectReason(
+  phase: MarketPhase,
+  i: ScoreInput,
+): string {
+  const aligned = i.ema20Dir === i.ema50Dir && i.ema20Dir !== "FLAT";
+  const dailyMatch = i.dailyEmaDir === i.ema20Dir && i.dailyEmaDir !== "FLAT";
+  const oiLabel = OI_LABELS[i.oiSignal];
+  const absFR = Math.abs(i.funding);
+  const absDist = Math.abs(i.distEma20);
+  const entryNote = absDist < 0.5 ? ", at EMA" : absDist > 10 ? ", extremely extended" : absDist > 5 ? ", overextended" : absDist > 3 ? ", extended" : "";
+
+  switch (phase) {
+    case "EXHAUSTION":
+      if (absFR >= 0.001) return i.funding > 0 ? "Longs crowded, funding extreme — squeeze risk" : "Shorts crowded, funding extreme — squeeze risk";
+      if (absDist > 8) return `Price ${absDist.toFixed(1)}% from EMA, vol declining — exhaustion`;
+      return `Extended${entryNote}, funding elevated — reversal risk rising`;
+
+    case "VOLATILITY_EXPANSION":
+      return `Compression released, vol surge +${i.volVsAvg.toFixed(0)}%, ${i.momentum} momentum, ${oiLabel}`;
+
+    case "EARLY_BREAKOUT":
+      return `Compressed (${i.compressionScore}), ${oiLabel}, funding healthy — breakout building`;
+
+    case "CONTINUATION":
+      if (dailyMatch && aligned) return `Daily+H4 ${i.ema20Dir}, ${oiLabel}, vol ${i.volVsAvg > 0 ? "above" : "below"} avg${entryNote}`;
+      if (aligned) return `H4 ${i.ema20Dir} trend, ${oiLabel}${entryNote}`;
+      return `Trend continuing, ${oiLabel}`;
+
+    case "REVERSAL_RISK":
+      return `H4 candle against ${i.ema20Dir} trend, ${oiLabel} — instability`;
+
+    default:
+      if (i.ema20Dir !== i.ema50Dir) return `EMA20 ${i.ema20Dir} vs EMA50 ${i.ema50Dir} — no edge`;
+      return "No strong alignment between indicators";
+  }
+}
+
+// --- Batch Runner ---
 
 async function runBatch<T, R>(items: T[], fn: (item: T) => Promise<R>, concurrency: number): Promise<R[]> {
   const results: R[] = [];
@@ -128,86 +294,7 @@ async function runBatch<T, R>(items: T[], fn: (item: T) => Promise<R>, concurren
   return results;
 }
 
-const OI_LABELS: Record<OiSignal, string> = {
-  LONGS_OPEN: "longs opening",
-  SHORTS_OPEN: "shorts opening",
-  SHORTS_CLOSE: "shorts closing (weak rally)",
-  LONGS_CLOSE: "longs closing (weak dump)",
-  NEUTRAL: "OI flat",
-};
-
-export function detectReason(
-  ema20Dir: EmaDir,
-  ema50Dir: EmaDir,
-  dailyEmaDir: EmaDir,
-  emaConverging: boolean,
-  volVsAvg: number,
-  oiSignal: OiSignal,
-  h4Change: number,
-  funding: number,
-  distEma20 = 0,
-): string {
-  const absFR = Math.abs(funding);
-  const emaAligned = ema20Dir === ema50Dir && ema20Dir !== "FLAT";
-  const volOk = volVsAvg > 0;
-  const realOi = oiSignal === "LONGS_OPEN" || oiSignal === "SHORTS_OPEN";
-  const frSafe = absFR < 0.0003;
-  const dailyMatch = dailyEmaDir === ema20Dir && dailyEmaDir !== "FLAT";
-  const oiLabel = OI_LABELS[oiSignal];
-
-  if (absFR >= 0.001) {
-    return funding > 0
-      ? "Longs overleveraged, funding too high — long squeeze risk"
-      : "Shorts overleveraged, negative funding — short squeeze risk";
-  }
-
-  const absDist = Math.abs(distEma20);
-  const entryNote = absDist < 0.5 ? ", at EMA" : absDist > 10 ? ", extremely extended — high reversal risk" : absDist > 5 ? ", overextended" : absDist > 3 ? ", extended" : "";
-
-  // Best case: H4 + Daily aligned + vol + real OI
-  if (emaAligned && ema20Dir === "UP" && dailyMatch && volOk && realOi && h4Change > 0 && frSafe) {
-    return `Daily+H4 aligned UP, ${oiLabel}, vol above avg, FR safe${entryNote}`;
-  }
-  if (emaAligned && ema20Dir === "DOWN" && dailyMatch && volOk && realOi && h4Change < 0 && frSafe) {
-    return `Daily+H4 aligned DOWN, ${oiLabel}, vol above avg, FR safe${entryNote}`;
-  }
-
-  // H4 aligned but counter-daily
-  if (emaAligned && !dailyMatch && dailyEmaDir !== "FLAT") {
-    return `H4 EMA ${ema20Dir} but Daily EMA ${dailyEmaDir} — counter-trend, higher risk`;
-  }
-
-  // H4 aligned + partial signals
-  if (emaAligned && ema20Dir === "UP" && h4Change > 0) {
-    if (!realOi) return `EMA UP + H4 green but ${oiLabel} — weak move`;
-    if (!volOk) return "EMA UP + H4 green but vol below avg — weak conviction";
-  }
-  if (emaAligned && ema20Dir === "DOWN" && h4Change < 0) {
-    if (!realOi) return `EMA DOWN + H4 red but ${oiLabel} — weak move`;
-    if (!volOk) return "EMA DOWN + H4 red but vol below avg — weak conviction";
-  }
-
-  // EMA converging = squeeze
-  if (emaConverging && ema20Dir !== ema50Dir) {
-    return `EMA20/50 converging — breakout imminent, wait for direction`;
-  }
-
-  // Pullback/bounce
-  if (emaAligned && ema20Dir === "UP" && h4Change < 0 && realOi) {
-    return `Uptrend pullback, ${oiLabel} — dip buy zone`;
-  }
-  if (emaAligned && ema20Dir === "DOWN" && h4Change > 0 && realOi) {
-    return `Downtrend bounce, ${oiLabel} — short zone`;
-  }
-
-  if (ema20Dir !== ema50Dir) {
-    return emaConverging
-      ? "EMA converging — squeeze building, no clear direction yet"
-      : `EMA20 ${ema20Dir} vs EMA50 ${ema50Dir} — conflicting, no edge`;
-  }
-
-  return "No strong alignment between indicators";
-}
+// --- Main Analysis ---
 
 async function analyzeCoin(coin: any): Promise<CoinAnalysis | null> {
   try {
@@ -218,14 +305,15 @@ async function analyzeCoin(coin: any): Promise<CoinAnalysis | null> {
       fetchOIHistory(symbol),
     ]);
 
-    // Use only closed candles (skip last/current candle)
-    const allCloses = klines.map((k: any) => Number(k[4])).reverse();
-    const allVolumes = klines.map((k: any) => Number(k[5])).reverse();
-    const closes = allCloses.slice(0, -1);
-    const volumes = allVolumes.slice(0, -1);
+    // Parse candles (skip current live candle)
+    const allCandles = klinesToCandles(klines);
+    const candles = allCandles.slice(0, -1);
+    const closes = candles.map(c => c.close);
+    const volumes = candles.map(c => c.volume);
 
-    if (closes.length < 21) return null;
+    if (closes.length < 51) return null;
 
+    // --- Trend ---
     const { ema20Dir, ema50Dir } = analyzeTrend(closes);
     const funding = Number(coin.fundingRate);
     const price = Number(coin.lastPrice);
@@ -233,15 +321,15 @@ async function analyzeCoin(coin: any): Promise<CoinAnalysis | null> {
     const ema50 = calculateEMA(closes, 50);
     const prevEma20 = calculateEMA(closes.slice(0, -1), 20);
     const prevEma50 = calculateEMA(closes.slice(0, -1), 50);
-    const distEma20 = ((price - ema20) / ema20) * 100;
-    const distEma50 = ((price - ema50) / ema50) * 100;
+    const distEma20 = round(((price - ema20) / ema20) * 100);
+    const distEma50 = round(((price - ema50) / ema50) * 100);
 
-    // EMA convergence: gap shrinking
+    // EMA convergence
     const gapNow = Math.abs(ema20 - ema50) / ema50 * 100;
     const gapPrev = Math.abs(prevEma20 - prevEma50) / prevEma50 * 100;
     const emaConverging = gapNow < gapPrev && gapNow < 1;
 
-    // Daily EMA direction (both EMA20 and EMA50)
+    // --- Daily ---
     const dailyCloses = dailyKlines.map((k: any) => Number(k[4])).reverse();
     const dailyTrend = dailyCloses.length >= 51
       ? analyzeTrend(dailyCloses)
@@ -251,42 +339,77 @@ async function analyzeCoin(coin: any): Promise<CoinAnalysis | null> {
     const dailyEmaDir = dailyTrend.ema20Dir;
     const dailyAligned = dailyTrend.ema20Dir === dailyTrend.ema50Dir && dailyTrend.ema20Dir !== "FLAT";
 
-    // H4 change: average of last 3 closed candles vs prior 3 (smooths single-candle noise)
+    // --- H4 Change (smoothed 3 vs 3) ---
     const recent3 = closes.slice(-3);
     const prior3 = closes.slice(-6, -3);
-    const avgRecent = recent3.reduce((a: number, b: number) => a + b, 0) / recent3.length;
-    const avgPrior = prior3.reduce((a: number, b: number) => a + b, 0) / prior3.length;
-    const h4Change = ((avgRecent - avgPrior) / avgPrior) * 100;
+    const avgRecent = recent3.reduce((a, b) => a + b, 0) / recent3.length;
+    const avgPrior = prior3.reduce((a, b) => a + b, 0) / prior3.length;
+    const h4Change = round(((avgRecent - avgPrior) / avgPrior) * 100);
+    const momentum = classifyMomentum(h4Change);
 
-    // Volume: average of last 3 closed candles vs average of prior 20
-    const last3 = volumes.slice(-3);
-    const prior20 = volumes.slice(-23, -3);
-    const avgLast3 = last3.reduce((a: number, b: number) => a + b, 0) / last3.length;
-    const avgPrior20 = prior20.length > 0
-      ? prior20.reduce((a: number, b: number) => a + b, 0) / prior20.length
-      : avgLast3;
-    const volVsAvg = avgPrior20 > 0 ? ((avgLast3 - avgPrior20) / avgPrior20) * 100 : 0;
+    // --- Volume ---
+    const last3v = volumes.slice(-3);
+    const prior20v = volumes.slice(-23, -3);
+    const avgLast3 = last3v.reduce((a, b) => a + b, 0) / last3v.length;
+    const avgPrior20 = prior20v.length > 0 ? prior20v.reduce((a, b) => a + b, 0) / prior20v.length : avgLast3;
+    const volVsAvg = round(avgPrior20 > 0 ? ((avgLast3 - avgPrior20) / avgPrior20) * 100 : 0, 0);
 
-    // OI: average of last 2 vs average of prior 2 (fetch 4 data points)
+    // --- OI ---
     let oiChange = 0;
     if (oiHistory.length >= 4) {
       const oiRecent = (Number(oiHistory[0].openInterest) + Number(oiHistory[1].openInterest)) / 2;
       const oiPrior = (Number(oiHistory[2].openInterest) + Number(oiHistory[3].openInterest)) / 2;
-      oiChange = ((oiRecent - oiPrior) / oiPrior) * 100;
+      oiChange = round(((oiRecent - oiPrior) / oiPrior) * 100);
     } else if (oiHistory.length >= 2) {
-      const oiNow = Number(oiHistory[0].openInterest);
-      const oiPrev = Number(oiHistory[1].openInterest);
-      oiChange = ((oiNow - oiPrev) / oiPrev) * 100;
+      oiChange = round(((Number(oiHistory[0].openInterest) - Number(oiHistory[1].openInterest)) / Number(oiHistory[1].openInterest)) * 100);
     }
-
+    const oiMomentum = weightedOiMomentum(oiHistory);
     const oiSignal = getOiSignal(oiChange, h4Change);
-    const score = tradeScore(ema20Dir, ema50Dir, dailyEmaDir, dailyAligned, emaConverging, distEma20, distEma50, volVsAvg, oiSignal, oiChange, h4Change, funding);
-    const reason = detectReason(ema20Dir, ema50Dir, dailyEmaDir, emaConverging, volVsAvg, oiSignal, h4Change, funding, distEma20);
-    const tradeType = getTradeType(ema20Dir, ema50Dir, emaConverging, h4Change, distEma20);
+
+    // --- Compression (filter false positives: require volume not in deep dry-up or daily trend) ---
+    const rawComp = analyzeCompression(candles, closes);
+    const compressionValid = volVsAvg > -50 || dailyEmaDir !== "FLAT";
+    const compressionScore = compressionValid ? rawComp.compressionScore : 0;
+    const compressed = compressionValid && rawComp.compressed;
+
+    // --- Momentum acceleration ---
+    const momAccel = momentumAcceleration(closes);
+
+    // --- Breakout trigger: price above highest close of last 10 candles ---
+    const lookbackHighs = closes.slice(-11, -1); // prior 10 candles (not including current)
+    const localHigh = Math.max(...lookbackHighs);
+    const localLow = Math.min(...lookbackHighs);
+    const dir = ema20Dir === "UP" ? 1 : ema20Dir === "DOWN" ? -1 : 0;
+    const breakoutTriggered = dir > 0
+      ? closes[closes.length - 1] > localHigh
+      : dir < 0
+        ? closes[closes.length - 1] < localLow
+        : false;
+
+    // --- Scoring ---
+    const input: ScoreInput = {
+      ema20Dir, ema50Dir, dailyEmaDir, dailyAligned,
+      distEma20, distEma50, volVsAvg,
+      oiSignal, oiMomentum, h4Change, momentum, momAccel,
+      funding, compressionScore, compressed, breakoutTriggered,
+    };
+
+    const confScore = confirmationScore(input);
+    const potScore = potentialScore(input);
+
+    // --- Phase & Category ---
+    const phase = classifyPhase(input, confScore, potScore);
+    const category = assignCategory(phase, confScore, potScore);
+    // Score by category: A uses confirmation, B uses potential, C uses max
+    const score = round(category === "A" ? confScore : category === "B" ? potScore : Math.max(confScore, potScore));
+    const reason = detectReason(phase, input);
 
     return {
-      symbol, ema20Dir, ema50Dir, distEma20, distEma50, emaConverging, dailyEmaDir, dailyAligned,
-      volVsAvg, oiChange, oiSignal, h4Change, funding, score, reason, tradeType,
+      symbol, ema20Dir, ema50Dir, distEma20, distEma50, emaConverging,
+      dailyEmaDir, dailyAligned, volVsAvg, oiChange, oiMomentum, oiSignal,
+      h4Change, momentum, funding, compressionScore, compressed,
+      confirmationScore: confScore, potentialScore: potScore, score,
+      reason, phase, category,
     };
   } catch (err) {
     console.error(err);
@@ -313,4 +436,3 @@ export async function scanMarket(limit = 0): Promise<CoinAnalysis[]> {
   valid.sort((a, b) => b.score - a.score);
   return valid;
 }
-

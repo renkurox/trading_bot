@@ -24,7 +24,7 @@ export async function fetchOIHistory(symbol: string) {
         category: "linear",
         symbol,
         intervalTime: "4h",
-        limit: 4,
+        limit: 8,
       },
     }
   );

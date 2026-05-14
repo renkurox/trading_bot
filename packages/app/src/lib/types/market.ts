@@ -1,1 +1,1 @@
-export type { CoinAnalysis, OiSignal, TradeType } from "@tb/sdk";
+export type { CoinAnalysis, OiSignal, MarketPhase, MomentumClass, Category } from "@tb/sdk";
