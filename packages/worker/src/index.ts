@@ -47,7 +47,7 @@ async function sendTelegram(token: string, chatId: string, text: string): Promis
 function isGoodSetup(c: CoinAnalysis): boolean {
 	if (c.category === "C") return false;
 	if (c.phase === "EXHAUSTION" || c.phase === "REVERSAL_RISK") return false;
-	if (Math.abs(c.distEma50) > 5) return false;
+	if (Math.abs(c.distEma50) > 2) return false;
 	if (c.category === "A") return c.confirmationScore >= 60;
 	if (c.category === "B") return c.potentialScore >= 55;
 	return false;
